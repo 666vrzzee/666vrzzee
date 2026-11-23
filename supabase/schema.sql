@@ -29,6 +29,10 @@ create table if not exists public.profiles (
   updated_at timestamptz not null default now()
 );
 
+alter table public.profiles add column if not exists nip text default '';
+alter table public.profiles add column if not exists jabatan text default '';
+alter table public.profiles add column if not exists updated_at timestamptz not null default now();
+
 -- ----------------------------------------------------------------------------
 -- 2. Trigger Otomatis: User Pertama di Supabase Authentication menjadi ADMIN
 -- ----------------------------------------------------------------------------
@@ -109,6 +113,9 @@ create table if not exists public.classes (
   updated_at timestamptz not null default now()
 );
 
+alter table public.classes add column if not exists wali_kelas_id uuid references public.profiles(id) on delete set null;
+alter table public.classes add column if not exists updated_at timestamptz not null default now();
+
 -- Seed kelas awal standar SMK Prima Unggul (opsional, aman dijalankan ulang)
 insert into public.classes (name, tingkat, major_code) values
   ('X TKJ 1', 'X', 'TKJ'),
@@ -132,6 +139,12 @@ create table if not exists public.students (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+-- Pastikan kolom tersedia jika tabel students sudah ada sebelumnya
+alter table public.students
+  add column if not exists class_id uuid references public.classes(id) on update cascade on delete set null;
+alter table public.students
+  add column if not exists updated_at timestamptz not null default now();
 
 -- Trigger otomatis sinkronisasi class_id pada tabel students berdasarkan nama kelas & jurusan
 create or replace function public.sync_student_class_relation()
@@ -207,6 +220,10 @@ create table if not exists public.student_attendance (
   unique (student_id, tanggal)
 );
 
+alter table public.employee_attendance add column if not exists updated_at timestamptz not null default now();
+alter table public.student_attendance add column if not exists recorded_by uuid references public.profiles(id) on delete set null;
+alter table public.student_attendance add column if not exists updated_at timestamptz not null default now();
+
 -- ----------------------------------------------------------------------------
 -- 8. Index Performa Query & Foreign Keys
 -- ----------------------------------------------------------------------------
@@ -222,7 +239,8 @@ create index if not exists idx_stud_att_recorded_by on public.student_attendance
 -- ----------------------------------------------------------------------------
 -- 9. Relational Views untuk Pelaporan Cepat
 -- ----------------------------------------------------------------------------
-create or replace view public.v_employee_attendance_detail as
+create or replace view public.v_employee_attendance_detail
+with (security_invoker = true) as
 select
   ea.id,
   ea.tanggal,
@@ -239,7 +257,8 @@ select
 from public.employee_attendance ea
 join public.profiles p on p.id = ea.user_id;
 
-create or replace view public.v_student_attendance_detail as
+create or replace view public.v_student_attendance_detail
+with (security_invoker = true) as
 select
   sa.id,
   sa.tanggal,
