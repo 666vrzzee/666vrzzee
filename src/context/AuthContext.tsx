@@ -30,14 +30,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [supabaseConfigured, setSupabaseConfigured] = useState(true);
 
-  const syncProfileFromServer = useCallback(async () => {
+  const syncProfileFromServer = useCallback(async (throwOnError = false) => {
     try {
       const res = await apiFetch<{ profile: UserProfile }>('/api/auth/sync-profile', {
         method: 'POST',
       });
       setProfile(res.profile);
-    } catch {
+    } catch (err) {
       setProfile(null);
+      if (throwOnError) {
+        throw err;
+      }
     }
   }, []);
 
@@ -49,10 +52,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       try {
         const cfg = await getRuntimeConfig();
         if (!active) return;
-        setSupabaseConfigured(cfg.configured);
+        setSupabaseConfigured(cfg.configured || cfg.publicConfigured);
 
         const client = await getSupabaseClient();
         if (!client) {
+          setSupabaseConfigured(false);
           setLoading(false);
           return;
         }
@@ -64,7 +68,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setUser(data.session?.user ?? null);
 
         if (data.session?.user) {
-          await syncProfileFromServer();
+          await syncProfileFromServer(false);
         }
 
         const { data: authListener } = client.auth.onAuthStateChange(
@@ -73,7 +77,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             setSession(newSession);
             setUser(newSession?.user ?? null);
             if (newSession?.user) {
-              await syncProfileFromServer();
+              await syncProfileFromServer(false);
             } else {
               setProfile(null);
             }
@@ -97,7 +101,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const client = await getSupabaseClient();
     if (!client) {
       throw new Error(
-        'Konfigurasi Supabase belum tersedia. Atur SUPABASE_URL, SUPABASE_ANON_KEY, dan SUPABASE_SERVICE_ROLE_KEY di server.'
+        'Konfigurasi Supabase belum valid atau belum diisi. Pastikan SUPABASE_URL (diawali https://), SUPABASE_ANON_KEY, dan SUPABASE_SERVICE_ROLE_KEY sudah diatur.'
       );
     }
 
@@ -113,7 +117,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (data.session) {
       setSession(data.session);
       setUser(data.user);
-      await syncProfileFromServer();
+      await syncProfileFromServer(true);
     }
   };
 
@@ -143,6 +147,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setProfile(null);
   };
 
+  const refreshProfile = useCallback(async () => {
+    await syncProfileFromServer(false);
+  }, [syncProfileFromServer]);
+
   return (
     <AuthContext.Provider
       value={{
@@ -154,7 +162,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         signIn,
         registerUser,
         signOut,
-        refreshProfile: syncProfileFromServer,
+        refreshProfile,
       }}
     >
       {children}
