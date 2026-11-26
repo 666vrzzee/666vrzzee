@@ -38,6 +38,10 @@ function normalizeSupabaseUrl(raw: string | undefined): string {
   ) {
     return '';
   }
+  const dashboardMatch = value.match(/supabase\.com\/dashboard\/project\/([a-z0-9]+)/i);
+  if (dashboardMatch?.[1]) {
+    value = `https://${dashboardMatch[1]}.supabase.co`;
+  }
   if (!/^https?:\/\//i.test(value) && value.includes('.supabase.')) {
     value = `https://${value}`;
   }
@@ -490,6 +494,91 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
       sendJson(res, 201, {
         user: profile,
         isFirstAdmin: isFirstUser,
+      });
+      return;
+    }
+
+    if (method === 'POST' && pathname === '/api/auth/login') {
+      const { url, anonKey, serviceRoleKey } = getSupabaseEnv();
+      const apiKey = isRealSecret(anonKey) ? anonKey : serviceRoleKey;
+      if (!url || !isRealSecret(apiKey)) {
+        sendJson(res, 503, {
+          error:
+            'Supabase belum dikonfigurasi pada server. Pastikan SUPABASE_URL dan SUPABASE_ANON_KEY sudah diisi pada Environment Variables.',
+          code: 'SUPABASE_NOT_CONFIGURED',
+        });
+        return;
+      }
+
+      const body = await readJsonBody(req);
+      const email = String(body.email || '').trim().toLowerCase();
+      const password = String(body.password || '');
+
+      if (!email || !password) {
+        sendJson(res, 400, { error: 'Email dan kata sandi wajib diisi.' });
+        return;
+      }
+
+      const publicClient = createClient(url, apiKey, {
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false,
+        },
+      });
+
+      const { data, error } = await publicClient.auth.signInWithPassword({
+        email,
+        password,
+      });
+
+      if (error || !data.session || !data.user) {
+        sendJson(res, 401, {
+          error: error?.message || 'Email atau kata sandi tidak sesuai.',
+        });
+        return;
+      }
+
+      let profile: Record<string, unknown> | null = null;
+      const { admin } = getSupabaseAdmin();
+      if (admin) {
+        profile = await ensureUserProfile(admin, data.user);
+      } else {
+        const authedClient = createClient(url, apiKey, {
+          auth: { autoRefreshToken: false, persistSession: false },
+          global: { headers: { Authorization: `Bearer ${data.session.access_token}` } },
+        });
+        const { data: profData } = await authedClient
+          .from('profiles')
+          .select('*')
+          .eq('id', data.user.id)
+          .maybeSingle();
+
+        if (profData) {
+          profile = profData;
+        } else {
+          const meta = data.user.user_metadata || {};
+          const rawRole = String(meta.role || '');
+          const role: UserRole =
+            rawRole === 'admin' || rawRole === 'guru' || rawRole === 'tenaga_kependidikan'
+              ? rawRole
+              : 'tenaga_kependidikan';
+          profile = {
+            id: data.user.id,
+            email: data.user.email || email,
+            full_name: String(meta.full_name || email.split('@')[0] || 'Pengguna'),
+            role,
+            nip: String(meta.nip || ''),
+            jabatan: String(meta.jabatan || ''),
+            created_at: data.user.created_at,
+            updated_at: data.user.created_at,
+          };
+        }
+      }
+
+      sendJson(res, 200, {
+        session: data.session,
+        user: data.user,
+        profile,
       });
       return;
     }

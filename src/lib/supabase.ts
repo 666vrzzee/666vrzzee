@@ -9,6 +9,29 @@ interface RuntimeConfig {
 
 let cachedConfig: RuntimeConfig | null = null;
 let cachedClient: SupabaseClient | null = null;
+let memoryAccessToken = '';
+
+export function setFallbackAccessToken(token: string) {
+  memoryAccessToken = token;
+  try {
+    if (token) {
+      sessionStorage.setItem('smk_pu_fallback_token', token);
+    } else {
+      sessionStorage.removeItem('smk_pu_fallback_token');
+    }
+  } catch {
+    // Ignore storage restrictions
+  }
+}
+
+export function getFallbackAccessToken(): string {
+  if (memoryAccessToken) return memoryAccessToken;
+  try {
+    return sessionStorage.getItem('smk_pu_fallback_token') || '';
+  } catch {
+    return '';
+  }
+}
 
 function cleanEnvValue(raw: string | undefined): string {
   if (!raw) return '';
@@ -24,6 +47,10 @@ export function normalizeSupabaseUrl(raw: string | undefined): string {
     value.includes('your-supabase')
   ) {
     return '';
+  }
+  const dashboardMatch = value.match(/supabase\.com\/dashboard\/project\/([a-z0-9]+)/i);
+  if (dashboardMatch?.[1]) {
+    value = `https://${dashboardMatch[1]}.supabase.co`;
   }
   if (!/^https?:\/\//i.test(value) && value.includes('.supabase.')) {
     value = `https://${value}`;
@@ -111,8 +138,16 @@ export async function apiFetch<T>(url: string, options: RequestInit = {}): Promi
   let token = '';
 
   if (client) {
-    const { data } = await client.auth.getSession();
-    token = data.session?.access_token || '';
+    try {
+      const { data } = await client.auth.getSession();
+      token = data.session?.access_token || '';
+    } catch {
+      token = '';
+    }
+  }
+
+  if (!token) {
+    token = getFallbackAccessToken();
   }
 
   const headers = new Headers(options.headers || {});
@@ -123,7 +158,15 @@ export async function apiFetch<T>(url: string, options: RequestInit = {}): Promi
     headers.set('Authorization', `Bearer ${token}`);
   }
 
-  const res = await fetch(url, { ...options, headers });
+  let res: Response;
+  try {
+    res = await fetch(url, { ...options, headers });
+  } catch {
+    throw new Error(
+      `Gagal terhubung ke server API (${url}). Pastikan koneksi internet stabil dan deployment Vercel/server aktif.`
+    );
+  }
+
   const text = await res.text();
   let json: Record<string, unknown> = {};
   try {
