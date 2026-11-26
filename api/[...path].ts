@@ -1,4 +1,3 @@
-import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
@@ -40,39 +39,59 @@ function isRealSecret(value: string): boolean {
   );
 }
 
-const SUPABASE_URL = normalizeSupabaseUrl(
-  process.env.SUPABASE_URL ||
-    process.env.VITE_SUPABASE_URL ||
-    process.env.NEXT_PUBLIC_SUPABASE_URL
-);
-const SUPABASE_ANON_KEY = cleanEnvValue(
-  process.env.SUPABASE_ANON_KEY ||
-    process.env.VITE_SUPABASE_ANON_KEY ||
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-);
-const SUPABASE_SERVICE_ROLE_KEY = cleanEnvValue(process.env.SUPABASE_SERVICE_ROLE_KEY);
-
-let supabaseAdmin: SupabaseClient | null = null;
-if (
-  SUPABASE_URL &&
-  isRealSecret(SUPABASE_ANON_KEY) &&
-  isRealSecret(SUPABASE_SERVICE_ROLE_KEY)
-) {
-  try {
-    supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-      auth: {
-        autoRefreshToken: false,
-        persistSession: false,
-      },
-    });
-  } catch (err) {
-    console.warn('Supabase initialization skipped due to invalid configuration:', err);
-    supabaseAdmin = null;
-  }
+function getSupabaseEnv() {
+  const url = normalizeSupabaseUrl(
+    process.env.SUPABASE_URL ||
+      process.env.VITE_SUPABASE_URL ||
+      process.env.NEXT_PUBLIC_SUPABASE_URL
+  );
+  const anonKey = cleanEnvValue(
+    process.env.SUPABASE_ANON_KEY ||
+      process.env.VITE_SUPABASE_ANON_KEY ||
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  );
+  const serviceRoleKey = cleanEnvValue(process.env.SUPABASE_SERVICE_ROLE_KEY);
+  return { url, anonKey, serviceRoleKey };
 }
 
-const isSupabaseAdminConfigured = Boolean(supabaseAdmin);
-const isPublicConfigAvailable = Boolean(SUPABASE_URL && isRealSecret(SUPABASE_ANON_KEY));
+let cachedAdmin: SupabaseClient | null = null;
+let cachedEnvSignature = '';
+
+function getSupabaseAdmin(): {
+  admin: SupabaseClient | null;
+  url: string;
+  anonKey: string;
+  publicAvailable: boolean;
+} {
+  const { url, anonKey, serviceRoleKey } = getSupabaseEnv();
+  const publicAvailable = Boolean(url && isRealSecret(anonKey));
+  const signature = `${url}|${serviceRoleKey}`;
+
+  if (cachedAdmin && cachedEnvSignature === signature) {
+    return { admin: cachedAdmin, url, anonKey, publicAvailable };
+  }
+
+  if (url && isRealSecret(anonKey) && isRealSecret(serviceRoleKey)) {
+    try {
+      cachedAdmin = createClient(url, serviceRoleKey, {
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false,
+        },
+      });
+      cachedEnvSignature = signature;
+    } catch (err) {
+      console.warn('Supabase initialization skipped due to invalid configuration:', err);
+      cachedAdmin = null;
+      cachedEnvSignature = '';
+    }
+  } else {
+    cachedAdmin = null;
+    cachedEnvSignature = '';
+  }
+
+  return { admin: cachedAdmin, url, anonKey, publicAvailable };
+}
 
 function getJakartaDateString(date = new Date()): string {
   return new Intl.DateTimeFormat('en-CA', {
@@ -95,7 +114,8 @@ interface AuthenticatedRequest extends Request {
 }
 
 function requireSupabase(_req: Request, res: Response, next: NextFunction) {
-  if (!supabaseAdmin) {
+  const { admin } = getSupabaseAdmin();
+  if (!admin) {
     res.status(503).json({
       error:
         'Supabase belum dikonfigurasi pada server. Pastikan SUPABASE_URL, SUPABASE_ANON_KEY, dan SUPABASE_SERVICE_ROLE_KEY sudah diisi dengan benar pada Environment Variables.',
@@ -106,14 +126,15 @@ function requireSupabase(_req: Request, res: Response, next: NextFunction) {
   next();
 }
 
-async function ensureUserProfile(authUser: {
-  id: string;
-  email?: string;
-  user_metadata?: Record<string, unknown>;
-}) {
-  if (!supabaseAdmin) throw new Error('Supabase tidak tersedia');
-
-  const { data: existingProfile, error: fetchErr } = await supabaseAdmin
+async function ensureUserProfile(
+  admin: SupabaseClient,
+  authUser: {
+    id: string;
+    email?: string;
+    user_metadata?: Record<string, unknown>;
+  }
+) {
+  const { data: existingProfile, error: fetchErr } = await admin
     .from('profiles')
     .select('*')
     .eq('id', authUser.id)
@@ -127,7 +148,7 @@ async function ensureUserProfile(authUser: {
     return existingProfile;
   }
 
-  const { count, error: countErr } = await supabaseAdmin
+  const { count, error: countErr } = await admin
     .from('profiles')
     .select('*', { count: 'exact', head: true });
 
@@ -150,7 +171,7 @@ async function ensureUserProfile(authUser: {
     email.split('@')[0] ||
     'Pengguna';
 
-  const { data: inserted, error: insertErr } = await supabaseAdmin
+  const { data: inserted, error: insertErr } = await admin
     .from('profiles')
     .insert({
       id: authUser.id,
@@ -167,7 +188,7 @@ async function ensureUserProfile(authUser: {
     throw insertErr;
   }
 
-  await supabaseAdmin.auth.admin.updateUserById(authUser.id, {
+  await admin.auth.admin.updateUserById(authUser.id, {
     user_metadata: {
       ...authUser.user_metadata,
       full_name: fullName,
@@ -179,7 +200,8 @@ async function ensureUserProfile(authUser: {
 }
 
 async function authenticate(req: AuthenticatedRequest, res: Response, next: NextFunction) {
-  if (!supabaseAdmin) {
+  const { admin } = getSupabaseAdmin();
+  if (!admin) {
     res.status(503).json({
       error:
         'Supabase Admin belum dikonfigurasi pada server. Pastikan SUPABASE_SERVICE_ROLE_KEY sudah diisi pada Environment Variables.',
@@ -196,13 +218,13 @@ async function authenticate(req: AuthenticatedRequest, res: Response, next: Next
 
   const token = authHeader.slice(7);
   try {
-    const { data, error } = await supabaseAdmin.auth.getUser(token);
+    const { data, error } = await admin.auth.getUser(token);
     if (error || !data.user) {
       res.status(401).json({ error: 'Token sesi tidak valid atau sudah kedaluwarsa.' });
       return;
     }
 
-    const profile = await ensureUserProfile(data.user);
+    const profile = await ensureUserProfile(admin, data.user);
     req.authUser = {
       id: profile.id,
       email: profile.email,
@@ -233,17 +255,19 @@ export function createApiApp(): express.Express {
   app.use(express.json({ limit: '2mb' }));
 
   app.get('/api/config', (_req, res) => {
+    const { admin, url, anonKey, publicAvailable } = getSupabaseAdmin();
     res.json({
-      configured: isSupabaseAdminConfigured,
-      publicConfigured: isPublicConfigAvailable,
-      supabaseUrl: isPublicConfigAvailable ? SUPABASE_URL : '',
-      supabaseAnonKey: isPublicConfigAvailable ? SUPABASE_ANON_KEY : '',
+      configured: Boolean(admin),
+      publicConfigured: publicAvailable,
+      supabaseUrl: publicAvailable ? url : '',
+      supabaseAnonKey: publicAvailable ? anonKey : '',
     });
   });
 
   app.get('/api/auth/first-user-status', requireSupabase, async (_req, res) => {
     try {
-      const { data: listData, error: listErr } = await supabaseAdmin!.auth.admin.listUsers({
+      const { admin } = getSupabaseAdmin();
+      const { data: listData, error: listErr } = await admin!.auth.admin.listUsers({
         page: 1,
         perPage: 1,
       });
@@ -277,7 +301,8 @@ export function createApiApp(): express.Express {
     }
 
     try {
-      const { data: existingUsers, error: listErr } = await supabaseAdmin!.auth.admin.listUsers({
+      const { admin } = getSupabaseAdmin();
+      const { data: existingUsers, error: listErr } = await admin!.auth.admin.listUsers({
         page: 1,
         perPage: 1,
       });
@@ -288,7 +313,7 @@ export function createApiApp(): express.Express {
         ? 'admin'
         : 'tenaga_kependidikan';
 
-      const { data: created, error: createErr } = await supabaseAdmin!.auth.admin.createUser({
+      const { data: created, error: createErr } = await admin!.auth.admin.createUser({
         email: email.trim().toLowerCase(),
         password,
         email_confirm: true,
@@ -305,7 +330,7 @@ export function createApiApp(): express.Express {
         return;
       }
 
-      const profile = await ensureUserProfile({
+      const profile = await ensureUserProfile(admin!, {
         id: created.user.id,
         email: created.user.email,
         user_metadata: {
@@ -337,10 +362,11 @@ export function createApiApp(): express.Express {
 
   app.get('/api/dashboard', authenticate, async (req: AuthenticatedRequest, res) => {
     try {
+      const { admin } = getSupabaseAdmin();
       const today = getJakartaDateString();
       const user = req.authUser!;
 
-      const { data: myTodayAttendance } = await supabaseAdmin!
+      const { data: myTodayAttendance } = await admin!
         .from('employee_attendance')
         .select('*')
         .eq('user_id', user.id)
@@ -348,7 +374,7 @@ export function createApiApp(): express.Express {
         .maybeSingle();
 
       const monthPrefix = today.slice(0, 7);
-      const { data: myMonthRecords } = await supabaseAdmin!
+      const { data: myMonthRecords } = await admin!
         .from('employee_attendance')
         .select('*')
         .eq('user_id', user.id)
@@ -364,12 +390,12 @@ export function createApiApp(): express.Express {
       let recentEmployeeAttendance: unknown[] = [];
 
       if (user.role === 'admin' || user.role === 'guru') {
-        const { count: studentCount } = await supabaseAdmin!
+        const { count: studentCount } = await admin!
           .from('students')
           .select('*', { count: 'exact', head: true });
         totalStudents = studentCount ?? 0;
 
-        const { data: studentAttToday } = await supabaseAdmin!
+        const { data: studentAttToday } = await admin!
           .from('student_attendance')
           .select('status')
           .eq('tanggal', today);
@@ -383,7 +409,7 @@ export function createApiApp(): express.Express {
           todayStudentSummary.totalRecorded = studentAttToday.length;
         }
 
-        const { data: recentStud } = await supabaseAdmin!
+        const { data: recentStud } = await admin!
           .from('student_attendance')
           .select('*, student:students(id, nis, nama, kelas, jurusan)')
           .order('created_at', { ascending: false })
@@ -392,12 +418,12 @@ export function createApiApp(): express.Express {
       }
 
       if (user.role === 'admin') {
-        const { count: userCount } = await supabaseAdmin!
+        const { count: userCount } = await admin!
           .from('profiles')
           .select('*', { count: 'exact', head: true });
         totalUsers = userCount ?? 0;
 
-        const { data: empAttToday } = await supabaseAdmin!
+        const { data: empAttToday } = await admin!
           .from('employee_attendance')
           .select('status')
           .eq('tanggal', today);
@@ -411,7 +437,7 @@ export function createApiApp(): express.Express {
           todayEmployeeSummary.totalRecorded = empAttToday.length;
         }
 
-        const { data: recentEmp } = await supabaseAdmin!
+        const { data: recentEmp } = await admin!
           .from('employee_attendance')
           .select('*, profile:profiles(id, full_name, email, role, nip, jabatan)')
           .order('created_at', { ascending: false })
@@ -439,10 +465,11 @@ export function createApiApp(): express.Express {
 
   app.get('/api/attendance/employee/me', authenticate, async (req: AuthenticatedRequest, res) => {
     try {
+      const { admin } = getSupabaseAdmin();
       const today = getJakartaDateString();
       const month = String(req.query.month || today.slice(0, 7));
 
-      const { data: todayRecord, error: todayErr } = await supabaseAdmin!
+      const { data: todayRecord, error: todayErr } = await admin!
         .from('employee_attendance')
         .select('*')
         .eq('user_id', req.authUser!.id)
@@ -451,7 +478,7 @@ export function createApiApp(): express.Express {
 
       if (todayErr) throw todayErr;
 
-      const { data: history, error: histErr } = await supabaseAdmin!
+      const { data: history, error: histErr } = await admin!
         .from('employee_attendance')
         .select('*')
         .eq('user_id', req.authUser!.id)
@@ -475,6 +502,7 @@ export function createApiApp(): express.Express {
 
   app.post('/api/attendance/employee/check-in', authenticate, async (req: AuthenticatedRequest, res) => {
     try {
+      const { admin } = getSupabaseAdmin();
       const today = getJakartaDateString();
       const nowIso = new Date().toISOString();
       const { status = 'Hadir', catatan = '' } = req.body as {
@@ -487,7 +515,7 @@ export function createApiApp(): express.Express {
         return;
       }
 
-      const { data: existing } = await supabaseAdmin!
+      const { data: existing } = await admin!
         .from('employee_attendance')
         .select('*')
         .eq('user_id', req.authUser!.id)
@@ -499,7 +527,7 @@ export function createApiApp(): express.Express {
         return;
       }
 
-      const { data, error } = await supabaseAdmin!
+      const { data, error } = await admin!
         .from('employee_attendance')
         .insert({
           user_id: req.authUser!.id,
@@ -522,10 +550,11 @@ export function createApiApp(): express.Express {
 
   app.post('/api/attendance/employee/check-out', authenticate, async (req: AuthenticatedRequest, res) => {
     try {
+      const { admin } = getSupabaseAdmin();
       const today = getJakartaDateString();
       const nowIso = new Date().toISOString();
 
-      const { data: existing, error: findErr } = await supabaseAdmin!
+      const { data: existing, error: findErr } = await admin!
         .from('employee_attendance')
         .select('*')
         .eq('user_id', req.authUser!.id)
@@ -546,7 +575,7 @@ export function createApiApp(): express.Express {
         return;
       }
 
-      const { data, error } = await supabaseAdmin!
+      const { data, error } = await admin!
         .from('employee_attendance')
         .update({ check_out: nowIso, updated_at: nowIso })
         .eq('id', existing.id)
@@ -562,9 +591,13 @@ export function createApiApp(): express.Express {
     }
   });
 
-  async function resolveClassId(kelasName: string, majorCode: string): Promise<string | null> {
+  async function resolveClassId(
+    admin: SupabaseClient,
+    kelasName: string,
+    majorCode: string
+  ): Promise<string | null> {
     const cleanName = kelasName.trim();
-    const { data: existing } = await supabaseAdmin!
+    const { data: existing } = await admin
       .from('classes')
       .select('id')
       .ilike('name', cleanName)
@@ -575,7 +608,7 @@ export function createApiApp(): express.Express {
     const upper = cleanName.toUpperCase();
     const tingkat = upper.startsWith('XII') ? 'XII' : upper.startsWith('XI') ? 'XI' : 'X';
 
-    const { data: created, error: createErr } = await supabaseAdmin!
+    const { data: created, error: createErr } = await admin
       .from('classes')
       .upsert(
         { name: cleanName, tingkat, major_code: majorCode },
@@ -590,7 +623,8 @@ export function createApiApp(): express.Express {
 
   app.get('/api/majors', authenticate, async (_req, res) => {
     try {
-      const { data, error } = await supabaseAdmin!
+      const { admin } = getSupabaseAdmin();
+      const { data, error } = await admin!
         .from('majors')
         .select('*')
         .order('code', { ascending: true });
@@ -605,7 +639,8 @@ export function createApiApp(): express.Express {
 
   app.get('/api/classes', authenticate, requireRole('admin', 'guru'), async (_req, res) => {
     try {
-      const { data, error } = await supabaseAdmin!
+      const { admin } = getSupabaseAdmin();
+      const { data, error } = await admin!
         .from('classes')
         .select('*, major:majors(code, name, rumpun), wali_kelas:profiles(id, full_name)')
         .order('name', { ascending: true });
@@ -620,7 +655,8 @@ export function createApiApp(): express.Express {
 
   app.get('/api/students', authenticate, requireRole('admin', 'guru'), async (_req, res) => {
     try {
-      const { data, error } = await supabaseAdmin!
+      const { admin } = getSupabaseAdmin();
+      const { data, error } = await admin!
         .from('students')
         .select('*, class_info:classes(id, name, tingkat, major_code), major:majors(code, name, rumpun)')
         .order('kelas', { ascending: true })
@@ -649,8 +685,9 @@ export function createApiApp(): express.Express {
     }
 
     try {
-      const classId = await resolveClassId(kelas, jurusan.trim());
-      const { data, error } = await supabaseAdmin!
+      const { admin } = getSupabaseAdmin();
+      const classId = await resolveClassId(admin!, kelas, jurusan.trim());
+      const { data, error } = await admin!
         .from('students')
         .insert({
           nis: nis.trim(),
@@ -693,8 +730,9 @@ export function createApiApp(): express.Express {
     }
 
     try {
-      const classId = await resolveClassId(kelas, jurusan.trim());
-      const { data, error } = await supabaseAdmin!
+      const { admin } = getSupabaseAdmin();
+      const classId = await resolveClassId(admin!, kelas, jurusan.trim());
+      const { data, error } = await admin!
         .from('students')
         .update({
           nis: nis.trim(),
@@ -720,7 +758,8 @@ export function createApiApp(): express.Express {
   app.delete('/api/students/:id', authenticate, requireRole('admin'), async (req, res) => {
     const { id } = req.params;
     try {
-      const { error } = await supabaseAdmin!.from('students').delete().eq('id', id);
+      const { admin } = getSupabaseAdmin();
+      const { error } = await admin!.from('students').delete().eq('id', id);
       if (error) throw error;
       res.json({ success: true });
     } catch (err) {
@@ -732,8 +771,9 @@ export function createApiApp(): express.Express {
 
   app.get('/api/attendance/student', authenticate, requireRole('admin', 'guru'), async (req, res) => {
     try {
+      const { admin } = getSupabaseAdmin();
       const tanggal = String(req.query.tanggal || getJakartaDateString());
-      const { data: students, error: studErr } = await supabaseAdmin!
+      const { data: students, error: studErr } = await admin!
         .from('students')
         .select('*')
         .order('kelas', { ascending: true })
@@ -741,7 +781,7 @@ export function createApiApp(): express.Express {
 
       if (studErr) throw studErr;
 
-      const { data: attendanceRows, error: attErr } = await supabaseAdmin!
+      const { data: attendanceRows, error: attErr } = await admin!
         .from('student_attendance')
         .select('*')
         .eq('tanggal', tanggal);
@@ -776,6 +816,7 @@ export function createApiApp(): express.Express {
     }
 
     try {
+      const { admin } = getSupabaseAdmin();
       const nowIso = new Date().toISOString();
       const payload = items.map((item) => ({
         student_id: item.student_id,
@@ -786,7 +827,7 @@ export function createApiApp(): express.Express {
         updated_at: nowIso,
       }));
 
-      const { data, error } = await supabaseAdmin!
+      const { data, error } = await admin!
         .from('student_attendance')
         .upsert(payload, { onConflict: 'student_id,tanggal' })
         .select('*');
@@ -802,11 +843,12 @@ export function createApiApp(): express.Express {
 
   app.get('/api/rekap/karyawan', authenticate, requireRole('admin'), async (req, res) => {
     try {
+      const { admin } = getSupabaseAdmin();
       const today = getJakartaDateString();
       const startDate = String(req.query.startDate || `${today.slice(0, 7)}-01`);
       const endDate = String(req.query.endDate || today);
 
-      const { data, error } = await supabaseAdmin!
+      const { data, error } = await admin!
         .from('employee_attendance')
         .select('*, profile:profiles(id, full_name, email, role, nip, jabatan)')
         .gte('tanggal', startDate)
@@ -824,11 +866,12 @@ export function createApiApp(): express.Express {
 
   app.get('/api/rekap/siswa', authenticate, requireRole('admin', 'guru'), async (req, res) => {
     try {
+      const { admin } = getSupabaseAdmin();
       const today = getJakartaDateString();
       const startDate = String(req.query.startDate || `${today.slice(0, 7)}-01`);
       const endDate = String(req.query.endDate || today);
 
-      const { data, error } = await supabaseAdmin!
+      const { data, error } = await admin!
         .from('student_attendance')
         .select(
           '*, student:students(id, nis, nama, kelas, jurusan), recorder:profiles(id, full_name, role)'
@@ -848,17 +891,18 @@ export function createApiApp(): express.Express {
 
   app.get('/api/users', authenticate, requireRole('admin'), async (_req, res) => {
     try {
-      const { data: authUsersData, error: authErr } = await supabaseAdmin!.auth.admin.listUsers({
+      const { admin } = getSupabaseAdmin();
+      const { data: authUsersData, error: authErr } = await admin!.auth.admin.listUsers({
         page: 1,
         perPage: 1000,
       });
       if (authErr) throw authErr;
 
       for (const au of authUsersData.users) {
-        await ensureUserProfile(au);
+        await ensureUserProfile(admin!, au);
       }
 
-      const { data: profiles, error: profErr } = await supabaseAdmin!
+      const { data: profiles, error: profErr } = await admin!
         .from('profiles')
         .select('*')
         .order('created_at', { ascending: true });
@@ -899,7 +943,8 @@ export function createApiApp(): express.Express {
     }
 
     try {
-      const { data: created, error: createErr } = await supabaseAdmin!.auth.admin.createUser({
+      const { admin } = getSupabaseAdmin();
+      const { data: created, error: createErr } = await admin!.auth.admin.createUser({
         email: email.trim().toLowerCase(),
         password,
         email_confirm: true,
@@ -916,7 +961,7 @@ export function createApiApp(): express.Express {
         return;
       }
 
-      const { data: profile, error: upsertErr } = await supabaseAdmin!
+      const { data: profile, error: upsertErr } = await admin!
         .from('profiles')
         .upsert(
           {
@@ -964,6 +1009,7 @@ export function createApiApp(): express.Express {
     }
 
     try {
+      const { admin } = getSupabaseAdmin();
       const authUpdatePayload: {
         email: string;
         email_confirm: boolean;
@@ -988,7 +1034,7 @@ export function createApiApp(): express.Express {
         authUpdatePayload.password = password.trim();
       }
 
-      const { error: authUpdateErr } = await supabaseAdmin!.auth.admin.updateUserById(
+      const { error: authUpdateErr } = await admin!.auth.admin.updateUserById(
         id,
         authUpdatePayload
       );
@@ -997,7 +1043,7 @@ export function createApiApp(): express.Express {
         return;
       }
 
-      const { data: updatedProfile, error: profErr } = await supabaseAdmin!
+      const { data: updatedProfile, error: profErr } = await admin!
         .from('profiles')
         .update({
           email: email.trim().toLowerCase(),
@@ -1029,13 +1075,14 @@ export function createApiApp(): express.Express {
     }
 
     try {
-      const { error: deleteAuthErr } = await supabaseAdmin!.auth.admin.deleteUser(id, false);
+      const { admin } = getSupabaseAdmin();
+      const { error: deleteAuthErr } = await admin!.auth.admin.deleteUser(id, false);
       if (deleteAuthErr) {
         res.status(400).json({ error: deleteAuthErr.message });
         return;
       }
 
-      await supabaseAdmin!.from('profiles').delete().eq('id', id);
+      await admin!.from('profiles').delete().eq('id', id);
 
       res.json({ success: true, hardDeletedId: id });
     } catch (err) {
@@ -1045,5 +1092,13 @@ export function createApiApp(): express.Express {
     }
   });
 
+  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    const message = err instanceof Error ? err.message : 'Terjadi kesalahan pada server API.';
+    res.status(500).json({ error: message });
+  });
+
   return app;
 }
+
+const app = createApiApp();
+export default app;

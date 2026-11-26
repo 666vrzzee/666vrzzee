@@ -1,8 +1,9 @@
+import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
-import { createApiApp } from './server/app';
+import { createApiApp } from './api/[...path].ts';
 
 const PORT = 3000;
 
