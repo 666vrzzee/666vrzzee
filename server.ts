@@ -3,12 +3,20 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
-import { createApiApp } from './api/[...path].ts';
+import { handleApiRequest } from './api/index.ts';
 
 const PORT = 3000;
 
 async function startServer() {
-  const app = createApiApp();
+  const app = express();
+
+  app.all('/api/*', (req, res) => {
+    void handleApiRequest(req, res);
+  });
+
+  app.all('/api', (req, res) => {
+    void handleApiRequest(req, res);
+  });
 
   const isProd = process.env.NODE_ENV === 'production';
   if (!isProd) {
